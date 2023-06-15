@@ -1,0 +1,18 @@
+{
+	"hlalyx" : {
+		"DebugMode" : true,
+		"Stereo" : false,
+		"ZoomHeight" : 0.9,
+		"ZoomWidth" : 0.9,
+		"FOV" : 110,
+		"displayFrequency" : 60,
+		"renderHeight" : 1080,
+		"renderWidth" : 1920,
+		"secondsFromVsyncToPhotons" : 0,
+		"serialNumber" : "1000",
+		"windowHeight" : 1080,
+		"windowWidth" : 1920,
+		"windowX" : 0,
+		"windowY" : 0
+   }
+}
