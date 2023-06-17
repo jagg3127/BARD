@@ -1,16 +1,12 @@
-//============ Copyright (c) Valve Corporation, All rights reserved. ============
-//===================== Half-Life: Alyx novr mod / driver =======================
-
 #include "C:/VRFILES/openvr_driver.h"
-//#include "driverlog.h"
-
+#include "driverlog.h"
+#include "IniReader\IniReader.h"
+#include <windows.h>
+#include <atlbase.h>
 #include <vector>
 #include <thread>
 #include <chrono>
 
-#include <windows.h>
-#include <atlbase.h>
-#include "IniReader\IniReader.h"
 
 using namespace vr;
 using namespace std::chrono;
@@ -25,6 +21,37 @@ using namespace std::chrono;
 #define SYS_BTN		   0x0020
 #define StepPos        0.01; //0.0033;
 #define StepRot        0.4;
+#define M_PI 3.14159265358979323846
+
+#include <iostream>
+#include <cmath>
+#include <tuple>
+#include <string>
+using namespace std;
+
+
+tuple<int, int> move(float yaw, float x, float y, string direction, float amount) {
+	double newX = x;
+	double newY = y;
+
+	if (direction == "f") {
+		newX += amount * cos(yaw);
+		newY += amount * sin(yaw);
+	}
+	else if (direction == "b") {
+		newX -= amount * cos(yaw);
+		newY -= amount * sin(yaw);
+	}
+	else if (direction == "l") {
+		newX += amount * cos(yaw + M_PI / 2);
+		newY += amount * sin(yaw + M_PI / 2);
+	}
+	else if (direction == "r") {
+		newX += amount * cos(yaw - M_PI / 2);
+		newY += amount * sin(yaw - M_PI / 2);
+	}
+	return make_tuple(newX, newY);
+}
 
 inline HmdQuaternion_t HmdQuaternion_Init( double w, double x, double y, double z )
 {
@@ -35,7 +62,6 @@ inline HmdQuaternion_t HmdQuaternion_Init( double w, double x, double y, double 
 	quat.z = z;
 	return quat;
 }
-
 inline void HmdMatrix_SetIdentity( HmdMatrix34_t *pMatrix )
 {
 	pMatrix->m[0][0] = 1.f;
@@ -51,7 +77,6 @@ inline void HmdMatrix_SetIdentity( HmdMatrix34_t *pMatrix )
 	pMatrix->m[2][2] = 1.f;
 	pMatrix->m[2][3] = 0.f;
 }
-
 int KeyNameToKeyCode(std::string KeyName) {
 	std::transform(KeyName.begin(), KeyName.end(), KeyName.begin(), ::toupper);
 
@@ -184,14 +209,16 @@ int KeyNameToKeyCode(std::string KeyName) {
 
 	else return 0;
 }
+double DegToRad(double f) {
+	return f * (3.14159265358979323846 / 180);
+}
 
 // keys for use with the settings API
 static const char * const k_pch_Sample_Section = "hlalyx"; static const char * const k_pch_Sample_SerialNumber_String = "serialNumber"; static const char * const k_pch_Sample_ModelNumber_String = "modelNumber"; static const char * const k_pch_Sample_WindowX_Int32 = "windowX"; static const char * const k_pch_Sample_WindowY_Int32 = "windowY"; static const char * const k_pch_Sample_WindowWidth_Int32 = "windowWidth"; static const char * const k_pch_Sample_WindowHeight_Int32 = "windowHeight"; static const char * const k_pch_Sample_RenderWidth_Int32 = "renderWidth"; static const char * const k_pch_Sample_RenderHeight_Int32 = "renderHeight"; static const char * const k_pch_Sample_SecondsFromVsyncToPhotons_Float = "secondsFromVsyncToPhotons"; static const char * const k_pch_Sample_DisplayFrequency_Float = "displayFrequency"; static const char * const k_pch_Sample_ZoomWidth_Float = "ZoomWidth"; static const char * const k_pch_Sample_ZoomHeight_Float = "ZoomHeight"; static const char * const k_pch_Sample_FOV_Float = "FOV"; static const char * const k_pch_Sample_Stereo_Bool = "Stereo"; static const char * const k_pch_Sample_DebugMode_Bool = "DebugMode";
 
 //Velocity
-double FirstCtrlLastPos[3] = { 0, 0, 0 }, SecondCtrlLastPos[3] = { 0, 0, 0 }; milliseconds deltaTime;
+double LCTLLastPos[3] = { 0, 0, 0 }, RCTLLastPos[3] = { 0, 0, 0 }; milliseconds deltaTime;
 
-//Half Life Alyx
 typedef struct _HMDData
 {
 	double	X;
@@ -200,7 +227,12 @@ typedef struct _HMDData
 	double	Yaw;
 	double	Pitch;
 	double	Roll;
-} THMD, *PHMD; typedef struct _Controller
+} THMD, *PHMD; 
+THMD           MyHMD; 
+THMD           mouseHMD;  
+bool HMDConnected = false;
+
+typedef struct _Controller
 {
 	double	X;
 	double	Y;
@@ -212,16 +244,12 @@ typedef struct _HMDData
 	float	Trigger;
 	float	AxisX;
 	float	AxisY;
-} TController, *PController;
-THMD           MyHMD; 
-THMD           mouseHMD;                              
-TController    MyCtrl; 
-TController    MyCtrl2;
-bool           HMDConnected = false, ctrlsConnected = false;
+} TController, *PController;                            
+TController    LeftCTL; 
+TController    RightCTL;
+bool ctrlsConnected = false;
 
-double DegToRad(double f) {
-	return f * (3.14159265358979323846 / 180);
-}
+
 
 //Key bindings
 float IX_MOVEMENT_SPEED;
@@ -231,65 +259,61 @@ float IX_CROUCH_DIST; //0.8
 int   IX_crouch;
 
 //HMD
-int IX_HMD_xp; //right
-int IX_HMD_yp; //foward
-int IX_HMD_zp; //up
-
-int IX_HMD_xn; //left
-int IX_HMD_yn; //backwards
-int IX_HMD_zn; //down
+int IX_HMD_right_xp;  //right
+int IX_HMD_left_xn;   //left
+int IX_HMD_foward_yp; //foward
+int IX_HMD_back_yn;   //backwards
+int IX_HMD_up_zp;     //up
+int IX_HMD_down_zn;   //down
 
 
 //LEFT CONTROL
-int IX_CTL_left_xp; //right
-int IX_CTL_left_yp; //foward
-int IX_CTL_left_zp; //up 
+int LCTL_right_xp;    //right
+int LCTL_left_xn;     //left
+int LCTL_foward_yp;   //foward
+int LCTL_back_yn;     //backwards
+int LCTL_up_zp;       //up 
+int LCTL_down_zn;     //down
 
-int IX_CTL_left_xn; //left
-int IX_CTL_left_yn; //backwards
-int IX_CTL_left_zn; //down
+int LrCTL_foward_yp;
+int LrCTL_back_yn;
+int LrCTL_left_xn;
+int LrCTL_right_xp;
 
-int IX_CTL_left_f;
-int IX_CTL_left_b;
-int IX_CTL_left_l;
-int IX_CTL_left_r;
+int LCTL_trigger;
+int LCTL_btn_thumb;
+int LCTL_btn_menu;
 
-int IX_CTL_left_trigger;
-int IX_CTL_left_btn_thumb;
-int IX_CTL_left_btn_menu;
-
-int IX_CTL_left_reset_r;
-int IX_CTL_left_reset_xyz;
+int  LCTL_reset;
+int LrCTL_reset;
 
 //RIGHT CONTROL
-int IX_CTL_right_xp; //right
-int IX_CTL_right_yp; //foward
-int IX_CTL_right_zp; //up
+int RCTL_right_xp;    //right
+int RCTL_foward_yp;   //foward
+int RCTL_up_zp;       //up
+int RCTL_left_xn;     //left
+int RCTL_back_yn;     //backwards
+int RCTL_down_zn;     //down
 
-int IX_CTL_right_xn; //left
-int IX_CTL_right_yn; //backwards
-int IX_CTL_right_zn; //down
+int RrCTL_foward_yp;
+int RrCTL_back_yn;
+int RrCTL_left_xn;
+int RrCTL_left_xp;
 
-int IX_CTL_right_f;
-int IX_CTL_right_b;
-int IX_CTL_right_l;
-int IX_CTL_right_r;
+int RCTL_trigger;
+int RCTL_btn_thumb;
+int RCTL_btn_menu;
 
-int IX_CTL_right_trigger;
-int IX_CTL_right_btn_thumb;
-int IX_CTL_right_btn_menu;
-
-int IX_CTL_right_reset_r;
-int IX_CTL_right_reset_xyz;
+int RCTL_reset;
+int RrCTL_reset;
 
 //end key bindings
 
 
-double HMDPosX = 0; //left/right
-double HMDPosY = 0; //foward/back
+
 double HMDPosZ = 0; //up/down
 
-double FirstCtrlPos[3] = { 0, 0, 0 }, SecondCtrlPos[3] = { 0, 0, 0 };
+double LCTLPos[3] = { 0, 0, 0 }, RCTLPos[3] = { 0, 0, 0 };
 double CtrlsRollRight = 0, CtrlsPitchRight = 0;
 double CtrlsRollLeft  = 0, CtrlsPitchLeft  = 0;
 float  CrouchOffsetZ = 0;
@@ -299,64 +323,57 @@ int m_HalfWidth = 1920 / 2;
 int m_HalfHeight = 1080 / 2;
 float mouseSensetivePitch = 0.04;
 float mouseSensetiveYaw = 0.05;
-float mouseYaw = 0, mousePitch = 0;
+float prevYaw=0, mouseYaw = 0, mousePitch = 0;
 
 HWND SteamVRHeadsetWindow = 0;
 HWND HalfLifeAlyxWindow = 0;
 bool HeadsetWindowFocused = false;
 bool HalfLifeAlyxFocused = false;
 bool VRMode = false;
-float VRAimingAngleOffset;
 
-float oldPitch = 0, deltaPitch = 0;
-float oldRoll = 0, deltaRoll = 0;
-double CtrlPosOffset[3] = { 0, 0, 0 };
-
-//For fix left controller
-double FirstCtrlLastXYZ[3] = { 0, 0, 0 };
-double FirstCtrlLastYPR[3] = { 0, 0, 0 };
-
-double SecondCtrlYPROffset[3] = { 0, 0, 0 };
-double SecondCtrlLastYPR[3] = { 0, 0, 0 };
+double HMDPosX = 0; //left/right
+double HMDPosY = 0; //foward/back
 
 
-float LeftHandYaw = 0, LeftHandPitch = 0, LeftAngleDist = 0, LeftRadDist = 0, LeftYOffset = 0;
-float RightAngleDist = 0; //�������, ������� ���������� ����
-float RightHandYaw = 0, RightHandPitch = 0, RightRadDist = 0;
-
-float HandRadDist = 0;
-
-//Motion
-float MotionLeftRadDist = 0, MotionLeftAngleDist = 0;
-
-
-int GranadeTick = 0;
-bool UseGranade = false;
-
-bool Aiming = false;
-bool CoverMouth = false;
-bool PutHat = false;
-bool LaserMode = false;
-float LaserPos = 0, LaserYaw = 0;
-
-bool UsedEnergyBall = false;
+float  LeftHandYaw = 0,  LeftHandPitch = 0,  LeftAngleDist = 0,  LeftRadDist = 0;
+float RightHandYaw = 0, RightHandPitch = 0, RightAngleDist = 0, RightRadDist = 0;
 
 #define OffsetPitchByDefault -45
 float ZPosSensetive = 0.009;
 
-double OffsetYPR(float f, float f2)
+float OffsetYPR(float Yaw, float Pitch)
 {
-	f -= f2;
-	if (f < -180)
-		f += 360;
-	else if (f > 180)
-		f -= 360;
+	float NewYaw = Yaw;
+	float NewPitch = Pitch;
+	float Result = 0;
 
-	return f;
+	//Add the offset
+	NewYaw   += 0;
+	NewPitch += 0;
+
+	//Normalize the pitch
+	if (NewPitch > 90) {
+		NewPitch -= 180;
+	} else if (NewPitch < -90) {
+		NewPitch += 180;
+	}
+
+	//Check if the controller yaw is greater than 180 degrees or less than -180 degrees
+	if (NewYaw > 180) {
+		NewYaw -= 360;
+	} else if (NewYaw < -180) {
+		NewYaw += 360;
+	}
+
+	//Calculate the result
+	Result = NewYaw * cos(NewPitch) + NewPitch * sin(NewPitch);
+
+	return Result;
 }
 
 void MouseToYawPitch()
 {
+	prevYaw=mouseYaw;
 	POINT mousePos;
 
 	if (firstCP) {
@@ -390,34 +407,56 @@ bool key(int keyname) {
 
 void GetHMDData(__out THMD *HMD)
 {
-	
-	if (key(IX_HMD_xp)) {
-		HMDPosX += IX_MOVEMENT_SPEED;
-	}
-	if (key(IX_HMD_yp)) {
-		HMDPosY += IX_MOVEMENT_SPEED;
-	}
 
-
-	if (key(IX_HMD_xn)) {
-		HMDPosX -= IX_MOVEMENT_SPEED;
-	}
-	if (key(IX_HMD_yn)) {
-		HMDPosY -= IX_MOVEMENT_SPEED;
-	}
-
-
-	HMD->X = HMDPosX;
-	HMD->Y = HMDPosY;
-	HMD->Z = HMDPosZ - CrouchOffsetZ;
+	double HMDPosX = HMD->X; //left/right
+	double HMDPosY = HMD->Y; //foward/back
 
 	HMD->Yaw   = mouseHMD.Yaw * -1;
 	HMD->Pitch = mouseHMD.Pitch * -1;
 	HMD->Roll  = 0;  
+
+	HMD->X = HMDPosX * cos(HMD->Yaw) - HMDPosY * sin(HMD->Yaw);
+  	HMD->Y = HMDPosX * sin(HMD->Yaw) + HMDPosY * cos(HMD->Yaw);
+	HMD->Z = HMDPosZ - CrouchOffsetZ;
+
 }
 
 void GetControllersData(__out TController *FirstController, __out TController *SecondController)
 {
+	//Default
+	LeftHandYaw = 0;
+	LeftHandPitch = 0;
+	LeftAngleDist = 0;
+	LeftRadDist = 0;
+
+	RightHandYaw = 0;
+	RightHandPitch = 0;
+	RightAngleDist = 0;
+	RightRadDist = 0;
+
+	//CONTROL PITCH YAW HERE
+
+
+
+	//Rotation controllers
+	FirstController->Roll  = CtrlsRollLeft;
+	FirstController->Yaw   = OffsetYPR(mouseHMD.Yaw, LeftHandYaw);
+	FirstController->Pitch = OffsetYPR(OffsetYPR(OffsetYPR(mouseHMD.Pitch, -45), LeftHandPitch), CtrlsPitchLeft);
+
+	SecondController->Roll  = CtrlsRollRight;
+	SecondController->Yaw   = OffsetYPR(mouseHMD.Yaw, RightHandYaw);
+	SecondController->Pitch = OffsetYPR(OffsetYPR(OffsetYPR(mouseHMD.Pitch, -45), RightHandPitch), CtrlsPitchRight);
+
+	//New version of SteamVR driver with correct axes 
+	FirstController->Yaw    = FirstController->Yaw    * -1;
+	FirstController->Pitch  = FirstController->Pitch  * -1;
+
+	SecondController->Yaw   = SecondController->Yaw   * -1;
+	SecondController->Pitch = SecondController->Pitch * -1;
+
+
+	
+	
 	//Controllers default state 
 	FirstController->AxisX     = 0;
 	FirstController->AxisY     = 0;
@@ -430,56 +469,42 @@ void GetControllersData(__out TController *FirstController, __out TController *S
 	SecondController->Trigger  = 0;
 
 
-	//Default
-	LeftHandYaw = 0;
-	LeftHandPitch = 0;
-	LeftAngleDist = 0;
-	LeftRadDist = 0;
-
-	RightHandYaw = 0;
-	RightHandPitch = 0;
-	RightAngleDist = 0;
-	RightRadDist = 0;
-
-
-
-	
 
 	//Left hand setup
-	if (key(IX_CTL_left_reset_xyz)) {
-		FirstCtrlPos[0] = 0;
-		FirstCtrlPos[1] = 0;
-		FirstCtrlPos[2] = 0;
+	if (key(LCTL_reset)) {
+		LCTLPos[0] = 0;
+		LCTLPos[1] = 0;
+		LCTLPos[2] = 0;
 	} else {
-		if (key(IX_CTL_left_xp)) {
-			FirstCtrlPos[0] += IX_HAND_SPEED;
+		if (key(LCTL_right_xp)) {
+			tie(LCTLPos[0], LCTLPos[1]) = move(FirstController->Yaw, LCTLPos[0], LCTLPos[1], "r", IX_HAND_SPEED);
 		}
-		if (key(IX_CTL_left_yp)) {
-			FirstCtrlPos[1] += IX_HAND_SPEED;
+		if (key(LCTL_foward_yp)) {
+			tie(LCTLPos[0], LCTLPos[1]) = move(FirstController->Yaw, LCTLPos[0], LCTLPos[1], "f", IX_HAND_SPEED);
 		}
-		if (key(IX_CTL_left_zp)) {
-			FirstCtrlPos[2] += IX_HAND_SPEED;
-		}
-
-		if (key(IX_CTL_left_xn)) {
-			FirstCtrlPos[0] -= IX_HAND_SPEED;
-		}
-		if (key(IX_CTL_left_yn)) {
-			FirstCtrlPos[1] -= IX_HAND_SPEED;
-		}
-		if (key(IX_CTL_left_zn)) {
-			FirstCtrlPos[2] -= IX_HAND_SPEED;
+		if (key(LCTL_up_zp)) {
+			LCTLPos[2] += IX_HAND_SPEED;
 		}
 
-		if (key(IX_CTL_left_btn_menu)) {
+		if (key(LCTL_left_xn)) {
+			tie(LCTLPos[0], LCTLPos[1]) = move(FirstController->Yaw, LCTLPos[0], LCTLPos[1], "l", IX_HAND_SPEED);
+		}
+		if (key(LCTL_back_yn)) {
+			tie(LCTLPos[0], LCTLPos[1]) = move(FirstController->Yaw, LCTLPos[0], LCTLPos[1], "b", IX_HAND_SPEED);
+		}
+		if (key(LCTL_down_zn)) {
+			LCTLPos[2] -= IX_HAND_SPEED;
+		}
+
+		if (key(LCTL_btn_menu)) {
 			FirstController->Buttons |= MENU_BTN;
 		}
 
-		if (key(IX_CTL_left_btn_thumb)) {
+		if (key(LCTL_btn_thumb)) {
 			FirstController->Buttons |= THUMB_BTN;
 		}
 
-		if (key(IX_CTL_left_trigger)) {
+		if (key(LCTL_trigger)) {
 			FirstController->Trigger = 1;
 		}
 		else {
@@ -489,40 +514,40 @@ void GetControllersData(__out TController *FirstController, __out TController *S
 	
 
 	//Right hand setup
-	if (key(IX_CTL_right_reset_xyz)) {
-		SecondCtrlPos[0] = 0;
-		SecondCtrlPos[1] = 0;
-		SecondCtrlPos[2] = 0;
+	if (key(RCTL_reset)) {
+		RCTLPos[0] = 0;
+		RCTLPos[1] = 0;
+		RCTLPos[2] = 0;
 	} else {
-		if (key(IX_CTL_right_xp)) {
-			SecondCtrlLastPos[0] += IX_HAND_SPEED;
+		if (key(RCTL_right_xp)) {
+			tie(RCTLPos[0], RCTLPos[1]) = move(SecondController->Yaw, RCTLPos[0], RCTLPos[1], "r", IX_HAND_SPEED);
 		}
-		if (key(IX_CTL_right_yp)) {
-			SecondCtrlLastPos[1] += IX_HAND_SPEED;
+		if (key(RCTL_foward_yp)) {
+			tie(RCTLPos[0], RCTLPos[1]) = move(SecondController->Yaw, RCTLPos[0], RCTLPos[1], "f", IX_HAND_SPEED);
 		}
-		if (key(IX_CTL_right_zp)) {
-			SecondCtrlLastPos[2] += IX_HAND_SPEED;
-		}
-
-		if (key(IX_CTL_right_xn)) {
-			SecondCtrlLastPos[0] -= IX_HAND_SPEED;
-		}
-		if (key(IX_CTL_right_yn)) {
-			SecondCtrlLastPos[1] -= IX_HAND_SPEED;
-		}
-		if (key(IX_CTL_right_zn)) {
-			SecondCtrlLastPos[2] -= IX_HAND_SPEED;
+		if (key(RCTL_up_zp)) {
+			RCTLPos[2] += IX_HAND_SPEED;
 		}
 
-		if (key(IX_CTL_right_btn_menu)) {
+		if (key(RCTL_left_xn)) {
+			tie(RCTLPos[0], RCTLPos[1]) = move(SecondController->Yaw, RCTLPos[0], RCTLPos[1], "l", IX_HAND_SPEED);
+		}
+		if (key(RCTL_back_yn)) {
+			tie(RCTLPos[0], RCTLPos[1]) = move(SecondController->Yaw, RCTLPos[0], RCTLPos[1], "b", IX_HAND_SPEED);
+		}
+		if (key(RCTL_down_zn)) {
+			RCTLPos[2] -= IX_HAND_SPEED;
+		}
+
+		if (key(RCTL_btn_menu)) {
 			SecondController->Buttons |= MENU_BTN;
 		}
 
-		if (key(IX_CTL_right_btn_thumb)) {
+		if (key(RCTL_btn_thumb)) {
 			SecondController->Buttons |= THUMB_BTN;
 		}
 
-		if (key(IX_CTL_right_trigger)) {
+		if (key(RCTL_trigger)) {
 			SecondController->Trigger = 1;
 		}
 		else {
@@ -539,35 +564,20 @@ void GetControllersData(__out TController *FirstController, __out TController *S
 	}	
 
 
-	FirstController->X = FirstCtrlPos[0];
-	FirstController->Y = FirstCtrlPos[1];
-	FirstController->Z = FirstCtrlPos[2] - 0.15;
-
-	SecondController->X = SecondCtrlPos[0];
-	SecondController->Y = SecondCtrlPos[1];
-	SecondController->Z = SecondCtrlPos[2] - 0.15;
-
-	//Rotation controllers
-	FirstController->Roll  = CtrlsRollLeft;
-	FirstController->Yaw   = OffsetYPR(mouseHMD.Yaw, LeftHandYaw);
-	FirstController->Pitch = OffsetYPR(OffsetYPR(OffsetYPR(mouseHMD.Pitch, OffsetPitchByDefault), LeftHandPitch), CtrlsPitchLeft);
-
-
-
-	SecondController->Roll  = CtrlsRollRight;
-	SecondController->Yaw   = OffsetYPR(mouseHMD.Yaw, RightHandYaw);
-	SecondController->Pitch = OffsetYPR(OffsetYPR(OffsetYPR(mouseHMD.Pitch, OffsetPitchByDefault), RightHandPitch), CtrlsPitchRight);
 
 	
 
 
 
-	/*//New version of SteamVR driver with correct axes 
-	FirstController->Yaw    = FirstController->Yaw    * -1;
-	FirstController->Pitch  = FirstController->Pitch  * -1;
+	//movement
+	FirstController->X = LCTLPos[0]; 
+	FirstController->Y = LCTLPos[1];
+	FirstController->Z = LCTLPos[2] - 0.15;
 
-	SecondController->Yaw   = SecondController->Yaw   * -1;
-	SecondController->Pitch = SecondController->Pitch * -1;*/
+	SecondController->X = RCTLPos[0];
+	SecondController->Y = RCTLPos[1];
+	SecondController->Z = RCTLPos[2] - 0.15;
+
 }
 
 
@@ -1072,37 +1082,37 @@ public:
 		//Controllers positions and rotations
 		if (ControllerIndex == 1) {
 
-			pose.vecPosition[0] = MyCtrl.X;
-			pose.vecPosition[1] = MyCtrl.Z;
-			pose.vecPosition[2] = MyCtrl.Y;
+			pose.vecPosition[0] = LeftCTL.X;
+			pose.vecPosition[1] = LeftCTL.Z;
+			pose.vecPosition[2] = LeftCTL.Y;
 
 			//Velocity, right?
-			pose.vecVelocity[0] = (pose.vecPosition[0] - FirstCtrlLastPos[0]) * 1000 / max((int)deltaTime.count(), 1) / 3; // div 3 - ghosting fix, there are right ways to remove ghosting?
-			pose.vecVelocity[1] = (pose.vecPosition[1] - FirstCtrlLastPos[1]) * 1000 / max((int)deltaTime.count(), 1) / 3;
-			pose.vecVelocity[2] = (pose.vecPosition[2] - FirstCtrlLastPos[2]) * 1000 / max((int)deltaTime.count(), 1) / 3;
-			FirstCtrlLastPos[0] = pose.vecPosition[0];
-			FirstCtrlLastPos[1] = pose.vecPosition[1];
-			FirstCtrlLastPos[2] = pose.vecPosition[2];
+			pose.vecVelocity[0] = (pose.vecPosition[0] - LCTLLastPos[0]) * 1000 / max((int)deltaTime.count(), 1) / 3; // div 3 - ghosting fix, there are right ways to remove ghosting?
+			pose.vecVelocity[1] = (pose.vecPosition[1] - LCTLLastPos[1]) * 1000 / max((int)deltaTime.count(), 1) / 3;
+			pose.vecVelocity[2] = (pose.vecPosition[2] - LCTLLastPos[2]) * 1000 / max((int)deltaTime.count(), 1) / 3;
+			LCTLLastPos[0] = pose.vecPosition[0];
+			LCTLLastPos[1] = pose.vecPosition[1];
+			LCTLLastPos[2] = pose.vecPosition[2];
 
 			//Rotation first controller
-			pose.qRotation = EulerAngleToQuaternion(DegToRad(MyCtrl.Roll), DegToRad(-MyCtrl.Yaw), DegToRad(-MyCtrl.Pitch));
+			pose.qRotation = EulerAngleToQuaternion(DegToRad(LeftCTL.Roll), DegToRad(-LeftCTL.Yaw), DegToRad(-LeftCTL.Pitch));
 
 		} else { 
 			//Controller2
-			pose.vecPosition[0] = MyCtrl2.X;
-			pose.vecPosition[1] = MyCtrl2.Z;
-			pose.vecPosition[2] = MyCtrl2.Y;
+			pose.vecPosition[0] = RightCTL.X;
+			pose.vecPosition[1] = RightCTL.Z;
+			pose.vecPosition[2] = RightCTL.Y;
 
 			//Velocity, right?
-			pose.vecVelocity[0] = (pose.vecPosition[0] - SecondCtrlLastPos[0]) * 1000 / max((int)deltaTime.count(), 1) / 3; // div 3 - ghosting fix, there are right ways to remove ghosting?
-			pose.vecVelocity[1] = (pose.vecPosition[1] - SecondCtrlLastPos[1]) * 1000 / max((int)deltaTime.count(), 1) / 3;
-			pose.vecVelocity[2] = (pose.vecPosition[2] - SecondCtrlLastPos[2]) * 1000 / max((int)deltaTime.count(), 1) / 3;
-			SecondCtrlLastPos[0] = pose.vecPosition[0];
-			SecondCtrlLastPos[1] = pose.vecPosition[1];
-			SecondCtrlLastPos[2] = pose.vecPosition[2];
+			pose.vecVelocity[0] = (pose.vecPosition[0] - RCTLLastPos[0]) * 1000 / max((int)deltaTime.count(), 1) / 3; // div 3 - ghosting fix, there are right ways to remove ghosting?
+			pose.vecVelocity[1] = (pose.vecPosition[1] - RCTLLastPos[1]) * 1000 / max((int)deltaTime.count(), 1) / 3;
+			pose.vecVelocity[2] = (pose.vecPosition[2] - RCTLLastPos[2]) * 1000 / max((int)deltaTime.count(), 1) / 3;
+			RCTLLastPos[0] = pose.vecPosition[0];
+			RCTLLastPos[1] = pose.vecPosition[1];
+			RCTLLastPos[2] = pose.vecPosition[2];
 
 			//Rotation first controller
-			pose.qRotation = EulerAngleToQuaternion(DegToRad(MyCtrl2.Roll), DegToRad(-MyCtrl2.Yaw), DegToRad(-MyCtrl2.Pitch));
+			pose.qRotation = EulerAngleToQuaternion(DegToRad(RightCTL.Roll), DegToRad(-RightCTL.Yaw), DegToRad(-RightCTL.Pitch));
 
 		}
 
@@ -1133,40 +1143,40 @@ public:
 		
 		if (ControllerIndex == 1) {
 
-			vr::VRDriverInput()->UpdateBooleanComponent(HButtons[0], (MyCtrl.Buttons & MENU_BTN) != 0, 0); //Application Menu
-			vr::VRDriverInput()->UpdateBooleanComponent(HButtons[1], (MyCtrl.Buttons & GRIP_BTN) != 0, 0); //Grip
-			vr::VRDriverInput()->UpdateBooleanComponent(HButtons[2], (MyCtrl.Buttons & SYS_BTN) != 0, 0); //System
-			vr::VRDriverInput()->UpdateBooleanComponent(HButtons[3], (MyCtrl.Buttons & THUMB_BTN) != 0, 0); //Trackpad
+			vr::VRDriverInput()->UpdateBooleanComponent(HButtons[0], (LeftCTL.Buttons & MENU_BTN) != 0, 0); //Application Menu
+			vr::VRDriverInput()->UpdateBooleanComponent(HButtons[1], (LeftCTL.Buttons & GRIP_BTN) != 0, 0); //Grip
+			vr::VRDriverInput()->UpdateBooleanComponent(HButtons[2], (LeftCTL.Buttons & SYS_BTN) != 0, 0); //System
+			vr::VRDriverInput()->UpdateBooleanComponent(HButtons[3], (LeftCTL.Buttons & THUMB_BTN) != 0, 0); //Trackpad
 
-			vr::VRDriverInput()->UpdateScalarComponent(HAnalog[0], MyCtrl.AxisX, 0); //Trackpad x
-			vr::VRDriverInput()->UpdateScalarComponent(HAnalog[1], MyCtrl.AxisY, 0); //Trackpad y
+			vr::VRDriverInput()->UpdateScalarComponent(HAnalog[0], LeftCTL.AxisX, 0); //Trackpad x
+			vr::VRDriverInput()->UpdateScalarComponent(HAnalog[1], LeftCTL.AxisY, 0); //Trackpad y
 
-			if (MyCtrl.AxisX != 0 || MyCtrl.AxisY != 0) {
+			if (LeftCTL.AxisX != 0 || LeftCTL.AxisY != 0) {
 				vr::VRDriverInput()->UpdateBooleanComponent(HButtons[4], 1, 0); //Trackpad touch
 			}
 			else {
 				vr::VRDriverInput()->UpdateBooleanComponent(HButtons[4], 0, 0); //Trackpad touch
 			}
 
-			vr::VRDriverInput()->UpdateScalarComponent(HAnalog[2], MyCtrl.Trigger, 0); //Trigger
+			vr::VRDriverInput()->UpdateScalarComponent(HAnalog[2], LeftCTL.Trigger, 0); //Trigger
 		} else {
 			//Controller2
-			vr::VRDriverInput()->UpdateBooleanComponent(HButtons[0], (MyCtrl2.Buttons & MENU_BTN) != 0, 0); //Application Menu
-			vr::VRDriverInput()->UpdateBooleanComponent(HButtons[1], (MyCtrl2.Buttons & GRIP_BTN) != 0, 0); //Grip
-			vr::VRDriverInput()->UpdateBooleanComponent(HButtons[2], (MyCtrl2.Buttons & SYS_BTN) != 0, 0); //System
-			vr::VRDriverInput()->UpdateBooleanComponent(HButtons[3], (MyCtrl2.Buttons & THUMB_BTN) != 0, 0); //Trackpad
+			vr::VRDriverInput()->UpdateBooleanComponent(HButtons[0], (RightCTL.Buttons & MENU_BTN) != 0, 0); //Application Menu
+			vr::VRDriverInput()->UpdateBooleanComponent(HButtons[1], (RightCTL.Buttons & GRIP_BTN) != 0, 0); //Grip
+			vr::VRDriverInput()->UpdateBooleanComponent(HButtons[2], (RightCTL.Buttons & SYS_BTN) != 0, 0); //System
+			vr::VRDriverInput()->UpdateBooleanComponent(HButtons[3], (RightCTL.Buttons & THUMB_BTN) != 0, 0); //Trackpad
 
-			vr::VRDriverInput()->UpdateScalarComponent(HAnalog[0], MyCtrl2.AxisX, 0); //Trackpad x
-			vr::VRDriverInput()->UpdateScalarComponent(HAnalog[1], MyCtrl2.AxisY, 0); //Trackpad y
+			vr::VRDriverInput()->UpdateScalarComponent(HAnalog[0], RightCTL.AxisX, 0); //Trackpad x
+			vr::VRDriverInput()->UpdateScalarComponent(HAnalog[1], RightCTL.AxisY, 0); //Trackpad y
 
-			if (MyCtrl2.AxisX != 0 || MyCtrl2.AxisY != 0) {
+			if (RightCTL.AxisX != 0 || RightCTL.AxisY != 0) {
 				vr::VRDriverInput()->UpdateBooleanComponent(HButtons[4], 1, 0); //Trackpad touch
 			}
 			else {
 				vr::VRDriverInput()->UpdateBooleanComponent(HButtons[4], 0, 0); //Trackpad touch
 			}
 
-			vr::VRDriverInput()->UpdateScalarComponent(HAnalog[2], MyCtrl2.Trigger, 0); //Trigger
+			vr::VRDriverInput()->UpdateScalarComponent(HAnalog[2], RightCTL.Trigger, 0); //Trigger
 		}
 
 	}
@@ -1269,58 +1279,58 @@ EVRInitError CServerDriver_Sample::Init( vr::IVRDriverContext *pDriverContext )
 	IX_crouch = KeyNameToKeyCode(IniFile.ReadString("Keys", "CROUCH", "SHIFT"));
 
 	//HMD
-	IX_HMD_xp = KeyNameToKeyCode(IniFile.ReadString("Keys", "MOVE_RIGHT",     "SHIFT")); //right
-	IX_HMD_yp = KeyNameToKeyCode(IniFile.ReadString("Keys", "MOVE_BACKWARDS", "SHIFT")); //foward
-	IX_HMD_zp = KeyNameToKeyCode(IniFile.ReadString("Keys", "MOVE_UP",        "SHIFT")); //up
+	IX_HMD_right_xp = KeyNameToKeyCode(IniFile.ReadString("Keys", "MOVE_RIGHT",     "SHIFT")); //right
+	IX_HMD_foward_yp = KeyNameToKeyCode(IniFile.ReadString("Keys", "MOVE_BACKWARDS", "SHIFT")); //foward
+	IX_HMD_up_zp = KeyNameToKeyCode(IniFile.ReadString("Keys", "MOVE_UP",        "SHIFT")); //up
 
-	IX_HMD_xn = KeyNameToKeyCode(IniFile.ReadString("Keys", "MOVE_LEFT",      "SHIFT")); //left
-	IX_HMD_yn = KeyNameToKeyCode(IniFile.ReadString("Keys", "MOVE_FOWARD",    "SHIFT"));//backwards
-	IX_HMD_zn = KeyNameToKeyCode(IniFile.ReadString("Keys", "MOVE_DOWN",      "SHIFT"));//down
+	IX_HMD_left_xn = KeyNameToKeyCode(IniFile.ReadString("Keys", "MOVE_LEFT",      "SHIFT")); //left
+	IX_HMD_back_yn = KeyNameToKeyCode(IniFile.ReadString("Keys", "MOVE_FOWARD",    "SHIFT"));//backwards
+	IX_HMD_down_zn = KeyNameToKeyCode(IniFile.ReadString("Keys", "MOVE_DOWN",      "SHIFT"));//down
 
 
 	//LEFT CONTROL
-	IX_CTL_left_xp        = KeyNameToKeyCode(IniFile.ReadString("Keys", "LCTL_RIGHT",       "SHIFT")); //right
-	IX_CTL_left_yp        = KeyNameToKeyCode(IniFile.ReadString("Keys", "LCTL_FOWARD",      "SHIFT")); //foward
-	IX_CTL_left_zp        = KeyNameToKeyCode(IniFile.ReadString("Keys", "LCTL_UP",          "SHIFT")); //up 
+	LCTL_right_xp        = KeyNameToKeyCode(IniFile.ReadString("Keys", "LCTL_RIGHT",       "SHIFT")); //right
+	LCTL_foward_yp        = KeyNameToKeyCode(IniFile.ReadString("Keys", "LCTL_FOWARD",      "SHIFT")); //foward
+	LCTL_up_zp        = KeyNameToKeyCode(IniFile.ReadString("Keys", "LCTL_UP",          "SHIFT")); //up 
 
-	IX_CTL_left_xn        = KeyNameToKeyCode(IniFile.ReadString("Keys", "LCTL_LEFT",        "SHIFT")); //left
-	IX_CTL_left_yn        = KeyNameToKeyCode(IniFile.ReadString("Keys", "LCTL_BACKWARDS",   "SHIFT")); //backwards
-	IX_CTL_left_zn        = KeyNameToKeyCode(IniFile.ReadString("Keys", "LCTL_DOWN",        "SHIFT")); //down
+	LCTL_left_xn        = KeyNameToKeyCode(IniFile.ReadString("Keys", "LCTL_LEFT",        "SHIFT")); //left
+	LCTL_back_yn        = KeyNameToKeyCode(IniFile.ReadString("Keys", "LCTL_BACKWARDS",   "SHIFT")); //backwards
+	LCTL_down_zn        = KeyNameToKeyCode(IniFile.ReadString("Keys", "LCTL_DOWN",        "SHIFT")); //down
 
-	IX_CTL_left_f         = KeyNameToKeyCode(IniFile.ReadString("Keys", "LRCTL_FOWARD",     "SHIFT"));
-	IX_CTL_left_b         = KeyNameToKeyCode(IniFile.ReadString("Keys", "LRCTL_BACKWARDS",  "SHIFT"));
-	IX_CTL_left_l         = KeyNameToKeyCode(IniFile.ReadString("Keys", "LRCTL_LEFT",       "SHIFT"));
-	IX_CTL_left_r         = KeyNameToKeyCode(IniFile.ReadString("Keys", "LRCTL_RIGHT",      "SHIFT"));
+	LrCTL_foward_yp         = KeyNameToKeyCode(IniFile.ReadString("Keys", "LRCTL_FOWARD",     "SHIFT"));
+	LrCTL_back_yn         = KeyNameToKeyCode(IniFile.ReadString("Keys", "LRCTL_BACKWARDS",  "SHIFT"));
+	LrCTL_left_xn         = KeyNameToKeyCode(IniFile.ReadString("Keys", "LRCTL_LEFT",       "SHIFT"));
+	LrCTL_right_xp         = KeyNameToKeyCode(IniFile.ReadString("Keys", "LRCTL_RIGHT",      "SHIFT"));
 
-	IX_CTL_left_btn_menu  = KeyNameToKeyCode(IniFile.ReadString("Keys", "LCTL_MENU",        "SHIFT"));
-	IX_CTL_left_btn_thumb = KeyNameToKeyCode(IniFile.ReadString("Keys", "LCTL_THUMB",       "SHIFT"));
-	IX_CTL_left_trigger   = KeyNameToKeyCode(IniFile.ReadString("Keys", "LCTL_TRIGGER",     "SHIFT"));
+	LCTL_btn_menu  = KeyNameToKeyCode(IniFile.ReadString("Keys", "LCTL_MENU",        "SHIFT"));
+	LCTL_btn_thumb = KeyNameToKeyCode(IniFile.ReadString("Keys", "LCTL_THUMB",       "SHIFT"));
+	LCTL_trigger   = KeyNameToKeyCode(IniFile.ReadString("Keys", "LCTL_TRIGGER",     "SHIFT"));
 
-	IX_CTL_left_reset_r   = KeyNameToKeyCode(IniFile.ReadString("Keys", "LRCTL_RESET",      "SHIFT"));
-	IX_CTL_left_reset_xyz = KeyNameToKeyCode(IniFile.ReadString("Keys",  "LCTL_RESET",      "SHIFT"));
+	LCTL_reset   = KeyNameToKeyCode(IniFile.ReadString("Keys", "LRCTL_RESET",      "SHIFT"));
+	LrCTL_reset = KeyNameToKeyCode(IniFile.ReadString("Keys",  "LCTL_RESET",      "SHIFT"));
 
 
 
 	//RIGHT CONTROL
-	IX_CTL_right_xp        = KeyNameToKeyCode(IniFile.ReadString("Keys", "RCTL_RIGHT",      "SHIFT")); //right
-	IX_CTL_right_yp        = KeyNameToKeyCode(IniFile.ReadString("Keys", "RCTL_FOWARD",     "SHIFT")); //foward
-	IX_CTL_right_zp        = KeyNameToKeyCode(IniFile.ReadString("Keys", "RCTL_UP",         "SHIFT")); //up 
+	RCTL_right_xp        = KeyNameToKeyCode(IniFile.ReadString("Keys", "RCTL_RIGHT",      "SHIFT")); //right
+	RCTL_foward_yp        = KeyNameToKeyCode(IniFile.ReadString("Keys", "RCTL_FOWARD",     "SHIFT")); //foward
+	RCTL_up_zp        = KeyNameToKeyCode(IniFile.ReadString("Keys", "RCTL_UP",         "SHIFT")); //up 
 
-	IX_CTL_right_xn        = KeyNameToKeyCode(IniFile.ReadString("Keys", "RCTL_LEFT",       "SHIFT")); //left
-	IX_CTL_right_yn        = KeyNameToKeyCode(IniFile.ReadString("Keys", "RCTL_BACKWARDS",  "SHIFT")); //backwards
-	IX_CTL_right_zn        = KeyNameToKeyCode(IniFile.ReadString("Keys", "RCTL_DOWN",       "SHIFT")); //down
+	RCTL_left_xn        = KeyNameToKeyCode(IniFile.ReadString("Keys", "RCTL_LEFT",       "SHIFT")); //left
+	RCTL_back_yn        = KeyNameToKeyCode(IniFile.ReadString("Keys", "RCTL_BACKWARDS",  "SHIFT")); //backwards
+	RCTL_down_zn        = KeyNameToKeyCode(IniFile.ReadString("Keys", "RCTL_DOWN",       "SHIFT")); //down
 
-	IX_CTL_right_f         = KeyNameToKeyCode(IniFile.ReadString("Keys", "RRCTL_FOWARD",    "SHIFT"));
-	IX_CTL_right_b         = KeyNameToKeyCode(IniFile.ReadString("Keys", "RRCTL_BACKWARDS", "SHIFT"));
-	IX_CTL_right_l         = KeyNameToKeyCode(IniFile.ReadString("Keys", "RRCTL_LEFT",      "SHIFT"));
-	IX_CTL_right_r         = KeyNameToKeyCode(IniFile.ReadString("Keys", "RRCTL_RIGHT",     "SHIFT"));
+	RrCTL_foward_yp         = KeyNameToKeyCode(IniFile.ReadString("Keys", "RRCTL_FOWARD",    "SHIFT"));
+	RrCTL_back_yn         = KeyNameToKeyCode(IniFile.ReadString("Keys", "RRCTL_BACKWARDS", "SHIFT"));
+	RrCTL_left_xn         = KeyNameToKeyCode(IniFile.ReadString("Keys", "RRCTL_LEFT",      "SHIFT"));
+	RrCTL_left_xp         = KeyNameToKeyCode(IniFile.ReadString("Keys", "RRCTL_RIGHT",     "SHIFT"));
 
-	IX_CTL_right_btn_menu  = KeyNameToKeyCode(IniFile.ReadString("Keys", "RCTL_MENU",       "SHIFT"));
-	IX_CTL_right_btn_thumb = KeyNameToKeyCode(IniFile.ReadString("Keys", "RCTL_THUMB",      "SHIFT"));
-	IX_CTL_right_trigger    = KeyNameToKeyCode(IniFile.ReadString("Keys", "RCTL_TRIGGER",    "SHIFT"));
+	RCTL_btn_menu  = KeyNameToKeyCode(IniFile.ReadString("Keys", "RCTL_MENU",       "SHIFT"));
+	RCTL_btn_thumb = KeyNameToKeyCode(IniFile.ReadString("Keys", "RCTL_THUMB",      "SHIFT"));
+	RCTL_trigger    = KeyNameToKeyCode(IniFile.ReadString("Keys", "RCTL_TRIGGER",    "SHIFT"));
 
-	IX_CTL_right_reset_r   = KeyNameToKeyCode(IniFile.ReadString("Keys", "RRCTL_RESET",     "SHIFT"));
-	IX_CTL_right_reset_xyz = KeyNameToKeyCode(IniFile.ReadString("Keys",  "RCTL_RESET",     "SHIFT"));
+	RCTL_reset   = KeyNameToKeyCode(IniFile.ReadString("Keys", "RCTL_reset",     "SHIFT"));
+	RrCTL_reset = KeyNameToKeyCode(IniFile.ReadString("Keys",  "RCTL_RESET",     "SHIFT"));
 
 
 
@@ -1367,7 +1377,7 @@ void CServerDriver_Sample::RunFrame()
 
 	//HL Alyx
 	SteamVRHeadsetWindow = FindWindow(NULL, "Headset Window");
-	HalfLifeAlyxWindow = FindWindow(NULL, "Half-Life: Alyx");
+	HalfLifeAlyxWindow = FindWindow(NULL, "VRChat");
 
 	if ((GetAsyncKeyState(VK_F1) & 0x8000) != 0 || (GetAsyncKeyState(VK_F7) & 0x8000) != 0)
 		SetForegroundWindow(SteamVRHeadsetWindow);
@@ -1387,7 +1397,7 @@ void CServerDriver_Sample::RunFrame()
 
 	if (ctrlsConnected) {
 		
-		GetControllersData(&MyCtrl, &MyCtrl2);
+		GetControllersData(&LeftCTL, &RightCTL);
 
 		if (m_pController)
 		{
@@ -1428,4 +1438,3 @@ HMD_DLL_EXPORT void *HmdDriverFactory( const char *pInterfaceName, int *pReturnC
 
 	return NULL;
 }
-
